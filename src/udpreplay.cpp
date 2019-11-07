@@ -28,18 +28,21 @@ SOFTWARE.
 #include <netinet/udp.h>
 #include <pcap/pcap.h>
 #include <unistd.h>
+#include <pthread.h>
 
 int main(int argc, char *argv[]) {
+
   static const char usage[] =
       " [-i iface] [-l] [-s speed] [-c millisec] [-r repeat] [-t ttl] pcap\n"
       "\n"
       "  -i iface    interface to send packets through\n"
       "  -l          enable loopback\n"
       "  -c millisec constant milliseconds between packets\n"
-      "  -r repeat   number of times to loop data (-1 for infinite loop)\n"
+      "  -r repeat   number of times to loop data\n"
       "  -s speed    replay speed relative to pcap timestamps\n"
       "  -t ttl      packet ttl\n"
-      "  -b          enable broadcast (SO_BROADCAST)";
+      "  -b          enable broadcast (SO_BROADCAST)\n"
+      "  -a affinity set main thread affinity";
 
   int ifindex = 0;
   int loopback = 0;
@@ -48,9 +51,11 @@ int main(int argc, char *argv[]) {
   int repeat = 1;
   int ttl = -1;
   int broadcast = 0;
+  int affinity = 0;
+  pthread_t thread;
 
   int opt;
-  while ((opt = getopt(argc, argv, "i:bls:c:r:t:")) != -1) {
+  while ((opt = getopt(argc, argv, "i:bls:c:r:t:a:")) != -1) {
     switch (opt) {
     case 'i':
       ifindex = if_nametoindex(optarg);
@@ -77,8 +82,8 @@ int main(int argc, char *argv[]) {
       break;
     case 'r':
       repeat = std::stoi(optarg);
-      if (repeat != -1 && repeat <= 0) {
-        std::cerr << "repeat must be positive integer or -1" << std::endl;
+      if (repeat <= 0) {
+        std::cerr << "repeat must be positive integer" << std::endl;
         return 1;
       }
       break;
@@ -86,6 +91,18 @@ int main(int argc, char *argv[]) {
       ttl = std::stoi(optarg);
       if (ttl < 0) {
         std::cerr << "ttl must be non-negative integer" << std::endl;
+        return 1;
+      }
+      break;
+    case 'a':
+      affinity = std::stoi(optarg);
+      cpu_set_t aff;
+      CPU_ZERO(&aff);
+      CPU_SET(affinity, &aff);
+      thread = pthread_self();
+      if (pthread_setaffinity_np(thread, sizeof(aff), &aff) != 0)
+      {
+        std::cerr << "failed to set affinity" << std::endl;
         return 1;
       }
       break;
@@ -144,7 +161,7 @@ int main(int argc, char *argv[]) {
 
   char errbuf[PCAP_ERRBUF_SIZE];
 
-  for (int i = 0; repeat == -1 || i < repeat; i++) {
+  for (int i = 0; i < repeat; i++) {
 
     pcap_t *handle = pcap_open_offline(argv[optind], errbuf);
 
@@ -191,7 +208,8 @@ int main(int argc, char *argv[]) {
         tv = header.ts;
         const double delay =
             std::max(0.0, (diff.tv_sec * 1000000 + diff.tv_usec) * speed);
-        usleep(delay);
+        if (delay > 0)
+          usleep(delay);
       }
 
       ssize_t len = ntohs(udp->len) - 8;
